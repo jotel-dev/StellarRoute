@@ -53,8 +53,8 @@ export function useWallet() {
         network: next.network,
         isConnected: true,
       });
-    } catch (e: any) {
-      const msg = String(e?.message || "").toLowerCase();
+   } catch (e: unknown) {
+  const msg = e instanceof Error ? e.message.toLowerCase() : "";
 
       if (msg.includes("reject")) {
         setError("Connection request was rejected.");
