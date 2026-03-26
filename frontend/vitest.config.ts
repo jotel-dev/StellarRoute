@@ -5,11 +5,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["**/*.test.{ts,tsx}"],
-    server: {
-      deps: {
-        inline: ["lucide-react"],
-      },
-    },
+    setupFiles: ["./vitest.setup.ts"],
   },
   resolve: {
     alias: {
