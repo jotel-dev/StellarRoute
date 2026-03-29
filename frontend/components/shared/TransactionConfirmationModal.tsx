@@ -10,6 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { PathStep } from "@/types";
 import { RouteVisualization } from "./RouteVisualization";
+import { CopyButton } from "./CopyButton";
 import { describeTradeRoute } from "@/lib/route-helpers";
 import { TransactionStatus } from "@/types/transaction";
 import {
@@ -258,8 +259,15 @@ export function TransactionConfirmationModal({
                   <span>{networkFee} XLM</span>
                 </div>
                 <div className="flex flex-col gap-1 pt-2">
-                  <RouteVisualization 
-                    path={routePath} 
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Route</span>
+                    <CopyButton
+                      value={describeTradeRoute(routePath)}
+                      label="Copy route summary"
+                    />
+                  </div>
+                  <RouteVisualization
+                    path={routePath}
                     className="border-none shadow-none bg-transparent p-0"
                   />
                 </div>
@@ -344,7 +352,13 @@ export function TransactionConfirmationModal({
             </div>
             
             {txHash && (
-              <div className="min-h-[44px] flex items-center">
+              <div className="min-h-[44px] flex flex-col items-center gap-2">
+                <div className="flex items-center gap-1">
+                  <span className="font-mono text-xs text-muted-foreground truncate max-w-[240px]">
+                    {txHash}
+                  </span>
+                  <CopyButton value={txHash} label="Copy transaction hash" />
+                </div>
                 <a
                   href={`https://stellar.expert/explorer/public/tx/${txHash}`}
                   target="_blank"
