@@ -1,427 +1,363 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { TransactionConfirmationModal } from "@/components/shared/TransactionConfirmationModal";
-import { useTransactionHistory } from "@/hooks/useTransactionHistory";
+import { Input } from "@/components/ui/input";
 import {
-  TransactionCorrelationIds,
-  TransactionStatus,
-  TransactionTimelineEvent,
-  TimelinePhase,
-  TimelineEventState,
-  TimelineEventSource,
-} from "@/types/transaction";
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { TransactionConfirmationModal } from "@/components/shared/TransactionConfirmationModal";
+import { TradeRouteDisplay } from "@/components/shared/TradeRouteDisplay";
+import { usePairs } from "@/hooks/useApi";
+import { useQuoteRefresh } from "@/hooks/useQuoteRefresh";
+import { useTransactionLifecycle } from "@/hooks/useTransactionLifecycle";
+import { useWallet } from "@/components/providers/wallet-provider";
+import { useSettings } from "@/components/providers/settings-provider";
 import { toast } from "sonner";
-import { PathStep } from "@/types";
+import type { PathStep, TradingPair } from "@/types";
+import {
+  formatMaxAmountForInput,
+  maxDecimalsForSellAsset,
+  parseSellAmount,
+} from "@/lib/amount-input";
 
-// Mock wallet address for demo purposes
+import { QUOTE_AUTO_REFRESH_INTERVAL_MS } from "@/lib/quote-stale";
+
 const MOCK_WALLET = "GBSU...XYZ9";
 
-export function DemoSwap() {
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [txStatus, setTxStatus] = useState<TransactionStatus | "review">("review");
-  const [errorMessage, setErrorMessage] = useState<string>();
-  const [txHash, setTxHash] = useState<string>();
-  const [timelineEvents, setTimelineEvents] = useState<TransactionTimelineEvent[]>([]);
+function pairKey(p: TradingPair): string {
+  return `${p.base_asset}__${p.counter_asset}`;
+}
 
-  const { addTransaction, updateTransactionStatus } = useTransactionHistory(MOCK_WALLET);
-  const timeoutRefs = useRef<number[]>([]);
+const mockRoute: PathStep[] = [
+  {
+    from_asset: { asset_type: "native" },
+    to_asset: {
+      asset_type: "credit_alphanum4",
+      asset_code: "USDC",
+      asset_issuer: "GA5Z...",
+    },
+    price: "0.105",
+    source: "sdex",
+  },
+];
+
+export function DemoSwap() {
+  const { data: pairs, loading: pairsLoading, error: pairsError } = usePairs();
+  const { isConnected, stubSpendableBalance } = useWallet();
+  const { settings } = useSettings();
+
+  const [selectedKey, setSelectedKey] = useState<string>("");
+  const [sellRaw, setSellRaw] = useState<string>("");
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  const {
+    status: txStatus,
+    txHash,
+    errorMessage,
+    initiateSwap,
+    cancel,
+    resubmit,
+    tryAgain,
+    dismiss,
+  } = useTransactionLifecycle();
 
   useEffect(() => {
-    return () => {
-      timeoutRefs.current.forEach((timerId) => window.clearTimeout(timerId));
-      timeoutRefs.current = [];
-    };
-  }, []);
+    if (!pairs?.length) return;
+    setSelectedKey((current: string) => {
+      if (current && pairs.some((p) => pairKey(p) === current)) {
+        return current;
+      }
+      return pairKey(pairs[0]);
+    });
+  }, [pairs]);
 
-  // Mock Route Data
-  const mockRoute: PathStep[] = [
-    {
-      from_asset: { asset_type: "native" },
-      to_asset: { asset_type: "credit_alphanum4", asset_code: "USDC", asset_issuer: "GA5Z..." },
-      price: "0.105",
-      source: "sdex"
-    }
-  ];
+  const selectedPair = useMemo(
+    () => pairs?.find((p) => pairKey(p) === selectedKey) ?? null,
+    [pairs, selectedKey],
+  );
+
+  const sellMaxDecimals = selectedPair
+    ? maxDecimalsForSellAsset(
+        selectedPair.base_asset,
+        selectedPair.base_decimals,
+      )
+    : maxDecimalsForSellAsset("native");
+
+  const parseResult = parseSellAmount(sellRaw, sellMaxDecimals);
+
+  const numericForQuote =
+    parseResult.status === "ok" ? parseResult.numeric : undefined;
+
+  const quoteBase = selectedPair?.base_asset ?? "";
+  const quoteCounter = selectedPair?.counter_asset ?? "";
+
+  const {
+    data: quote,
+    loading: quoteLoading,
+    error: quoteError,
+    refresh,
+    manualRefreshCoolingDown,
+    autoRefreshEnabled,
+    setAutoRefreshEnabled,
+  } = useQuoteRefresh(quoteBase, quoteCounter, numericForQuote, "sell");
+
+  const refreshDisabled = quoteLoading || manualRefreshCoolingDown || !numericForQuote;
+
+  const amountInputInvalid =
+    sellRaw.trim() !== "" &&
+    parseResult.status !== "ok" &&
+    parseResult.status !== "empty";
+
+  const maxButtonTitle = !isConnected
+    ? "Connect wallet to use your maximum balance"
+    : undefined;
+
+  const applyMax = useCallback(() => {
+    if (!isConnected || stubSpendableBalance == null) return;
+    setSellRaw(formatMaxAmountForInput(stubSpendableBalance, sellMaxDecimals));
+  }, [isConnected, stubSpendableBalance, sellMaxDecimals]);
 
   const handleSwapClick = () => {
-    setTxStatus("review");
-    setErrorMessage(undefined);
-    setTxHash(undefined);
-    setTimelineEvents([]);
+    if (parseResult.status !== "ok" || !selectedPair) {
+      toast.error("Enter a valid sell amount and select a pair.");
+      return;
+    }
     setIsModalOpen(true);
   };
 
-  const randomId = (prefix: string): string =>
-    `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
-
-  const schedule = (callback: () => void, delay: number) => {
-    const timeoutId = window.setTimeout(callback, delay);
-    timeoutRefs.current.push(timeoutId);
-  };
-
-  const toStatus = (phase: TimelinePhase, state: TimelineEventState): TransactionStatus => {
-    if (phase === "finality" && state === "failed") {
-      return "failed";
-    }
-    if (phase === "finality" && state === "success") {
-      return "success";
-    }
-    if (phase === "signature") {
-      return "pending";
-    }
-    if (phase === "submit") {
-      return "submitting";
-    }
-    return "processing";
-  };
-
-  const makeEvent = (
-    phase: TimelinePhase,
-    source: TimelineEventSource,
-    state: TimelineEventState,
-    titleKey: string,
-    correlation: TransactionCorrelationIds,
-    attempt: number,
-    options?: {
-      descriptionKey?: string;
-      txHash?: string;
-      replacedTxHash?: string;
-      errorMessage?: string;
-      errorCode?: string;
-    },
-  ): TransactionTimelineEvent => ({
-    id: randomId("timeline"),
-    phase,
-    source,
-    state,
-    timestamp: Date.now(),
-    titleKey,
-    descriptionKey: options?.descriptionKey,
-    correlation,
-    attempt,
-    txHash: options?.txHash,
-    replacedTxHash: options?.replacedTxHash,
-    errorMessage: options?.errorMessage,
-    errorCode: options?.errorCode,
-  });
-
   const handleConfirm = () => {
-    const transactionId = randomId("tx");
-    const walletRequestId = randomId("wreq");
-    const apiRequestId = randomId("areq");
-    const primaryHash = randomId("mocktx");
+    if (parseResult.status !== "ok" || !selectedPair) return;
+    const fromAmt = parseResult.normalized;
+    const toAmt = quote?.total ?? "10.5";
 
-    const shouldRetry = Math.random() > 0.55;
-    const shouldReplace = shouldRetry && Math.random() > 0.5;
-    const replacementHash = shouldReplace ? randomId("replace") : undefined;
-    const isSuccess = Math.random() > 0.2;
-
-    let retryCount = 0;
-    let replacementCount = 0;
-    let events: TransactionTimelineEvent[] = [];
-    let correlation: TransactionCorrelationIds = {
-      walletRequestId,
-      apiRequestId,
-      txHash: primaryHash,
-      replacementTxHash: replacementHash,
-    };
-
-    const pushEvent = (
-      event: TransactionTimelineEvent,
-      options?: {
-        status?: TransactionStatus;
-        hash?: string;
-        errorMessage?: string;
-      },
-    ) => {
-      events = [...events, event];
-      setTimelineEvents(events);
-
-      const status = options?.status ?? toStatus(event.phase, event.state);
-      setTxStatus(status);
-
-      if (options?.hash) {
-        setTxHash(options.hash);
-      }
-      if (options?.errorMessage) {
-        setErrorMessage(options.errorMessage);
-      }
-
-      updateTransactionStatus(transactionId, status, {
-        hash: options?.hash,
-        errorMessage: options?.errorMessage,
-        timeline: events,
-        correlation,
-        retryCount,
-        replacementCount,
-      });
-    };
-
-    addTransaction({
-      id: transactionId,
-      timestamp: Date.now(),
-      fromAsset: "XLM",
-      fromAmount: "100",
-      toAsset: "USDC",
-      toAmount: "10.5",
-      exchangeRate: "0.105",
+    initiateSwap({
+      fromAsset: selectedPair.base ?? "XLM",
+      fromAmount: fromAmt,
+      toAsset: selectedPair.counter ?? "USDC",
+      toAmount: toAmt,
+      exchangeRate: quote?.price ?? "0.105",
       priceImpact: "0.1%",
-      minReceived: "10.45",
+      minReceived: toAmt,
       networkFee: "0.00001",
-      routePath: mockRoute,
-      status: "pending",
+      routePath: quote?.path?.length ? quote.path : mockRoute,
       walletAddress: MOCK_WALLET,
-      timeline: [],
-      correlation,
-      retryCount,
-      replacementCount,
-    });
-
-    pushEvent(
-      makeEvent(
-        "signature",
-        "wallet",
-        "active",
-        "timeline.signature.requested",
-        correlation,
-        1,
-        { descriptionKey: "timeline.signature.requested" },
-      ),
-      { status: "pending" },
-    );
-
-    schedule(() => {
-      pushEvent(
-        makeEvent(
-          "signature",
-          "wallet",
-          "success",
-          "timeline.signature.approved",
-          correlation,
-          1,
-        ),
-      );
-
-      pushEvent(
-        makeEvent(
-          "submit",
-          "api",
-          "active",
-          "timeline.submit.requested",
-          correlation,
-          1,
-          { descriptionKey: "timeline.submit.requested" },
-        ),
-        { status: "submitting" },
-      );
-    }, 1200);
-
-    schedule(() => {
-      if (!shouldRetry) {
-        return;
-      }
-
-      retryCount = 1;
-      pushEvent(
-        makeEvent(
-          "submit",
-          "api",
-          "retrying",
-          "timeline.submit.retry",
-          correlation,
-          2,
-          { descriptionKey: "timeline.submit.retry", errorCode: "E_RETRYABLE" },
-        ),
-        { status: "submitting" },
-      );
-    }, 2200);
-
-    schedule(() => {
-      if (shouldReplace && replacementHash) {
-        replacementCount = 1;
-        correlation = {
-          ...correlation,
-          txHash: replacementHash,
-          replacementTxHash: replacementHash,
-        };
-
-        pushEvent(
-          makeEvent(
-            "submit",
-            "api",
-            "success",
-            "timeline.submit.replaced",
-            correlation,
-            2,
-            {
-              descriptionKey: "timeline.submit.replaced",
-              txHash: replacementHash,
-              replacedTxHash: primaryHash,
-            },
-          ),
-          { status: "submitting", hash: replacementHash },
-        );
-      } else {
-        pushEvent(
-          makeEvent(
-            "submit",
-            "api",
-            "success",
-            "timeline.submit.accepted",
-            correlation,
-            retryCount > 0 ? 2 : 1,
-            { txHash: primaryHash },
-          ),
-          { status: "submitting", hash: primaryHash },
-        );
-      }
-
-      pushEvent(
-        makeEvent(
-          "inclusion",
-          "chain",
-          "active",
-          "timeline.inclusion.pending",
-          correlation,
-          1,
-          {
-            descriptionKey: "timeline.inclusion.pending",
-            txHash: correlation.txHash,
-          },
-        ),
-        { status: "processing", hash: correlation.txHash },
-      );
-    }, 3200);
-
-    schedule(() => {
-      pushEvent(
-        makeEvent(
-          "inclusion",
-          "chain",
-          "success",
-          "timeline.inclusion.confirmed",
-          correlation,
-          1,
-          { txHash: correlation.txHash },
-        ),
-      );
-
-      pushEvent(
-        makeEvent(
-          "finality",
-          "chain",
-          "active",
-          "timeline.finality.pending",
-          correlation,
-          1,
-          { descriptionKey: "timeline.finality.pending", txHash: correlation.txHash },
-        ),
-      );
-    }, 4600);
-
-    schedule(() => {
-      if (isSuccess) {
-        pushEvent(
-          makeEvent(
-            "finality",
-            "chain",
-            "success",
-            "timeline.finality.confirmed",
-            correlation,
-            1,
-            { txHash: correlation.txHash },
-          ),
-          { status: "success", hash: correlation.txHash },
-        );
-
+    }).then(() => {
+      if (txStatus === "confirmed") {
         toast.success("Transaction Successful!", {
-          description: "You have swapped 100 XLM for 10.5 USDC",
+          description: `Swapped ${fromAmt} ${selectedPair.base ?? ""} for ${toAmt} ${selectedPair.counter ?? ""}`,
         });
-        return;
       }
-
-      const failureReason = "Network congestion prevented final settlement.";
-      pushEvent(
-        makeEvent(
-          "finality",
-          "chain",
-          "failed",
-          "timeline.finality.failed",
-          correlation,
-          1,
-          {
-            descriptionKey: "timeline.finality.failed",
-            errorCode: "E_FINALITY_TIMEOUT",
-            errorMessage: failureReason,
-            txHash: correlation.txHash,
-          },
-        ),
-        { status: "failed", errorMessage: failureReason, hash: correlation.txHash },
-      );
-
-      toast.error("Transaction Failed", {
-        description: failureReason,
-      });
-    }, 6200);
+    });
   };
 
-  const handleCancel = () => {
-    setTxStatus("review");
-    timeoutRefs.current.forEach((timerId) => window.clearTimeout(timerId));
-    timeoutRefs.current = [];
-    console.log("Transaction cancelled");
+  const handleDismiss = () => {
+    dismiss();
+    setIsModalOpen(false);
   };
+
+  const handleDone = () => {
+    dismiss();
+    setIsModalOpen(false);
+  };
+
+  const handleTryAgain = () => {
+    tryAgain();
+  };
+
+  const handleResubmit = () => {
+    resubmit();
+  };
+
+  const receivePreview =
+    quote && parseResult.status === "ok" ? quote.total : "—";
 
   return (
-    <Card className="p-6 max-w-sm mx-auto shadow-lg mt-8 border-primary/20 bg-background/50 backdrop-blur-sm">
+    <Card className="p-6 max-w-lg mx-auto shadow-lg mt-8 border-primary/20 bg-background/50 backdrop-blur-sm">
       <div className="space-y-4">
         <div>
           <h2 className="text-xl font-bold mb-1">Swap Tokens</h2>
-          <p className="text-sm text-muted-foreground">Demo swap interface</p>
+          <p className="text-sm text-muted-foreground">
+            Demo swap with sell amount validation and debounced quotes
+          </p>
         </div>
-        
-        <div className="space-y-4 bg-muted/20 p-4 rounded-lg border">
-          <div>
-            <span className="text-sm font-medium">Pay</span>
-            <div className="text-2xl font-bold mt-1">100 XLM</div>
+
+        <div className="space-y-2">
+          <span className="text-sm font-medium">Pair</span>
+          {pairsLoading ? (
+            <p className="text-sm text-muted-foreground">Loading pairs…</p>
+          ) : pairsError ? (
+            <p className="text-sm text-destructive">
+              Could not load pairs. Start the API to select a market.
+            </p>
+          ) : pairs && pairs.length > 0 ? (
+            <Select value={selectedKey} onValueChange={setSelectedKey}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select pair" />
+              </SelectTrigger>
+              <SelectContent>
+                {pairs.map((p) => (
+                  <SelectItem key={pairKey(p)} value={pairKey(p)}>
+                    {p.base} / {p.counter}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No pairs from the indexer yet. You can still try amount validation
+              (sell asset defaults to native precision).
+            </p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-sm font-medium">
+              Sell amount
+              {selectedPair ? ` (${selectedPair.base})` : " (XLM)"}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8"
+              disabled={!isConnected}
+              title={maxButtonTitle}
+              onClick={applyMax}
+            >
+              Max
+            </Button>
           </div>
-          <div>
-            <span className="text-sm font-medium">Receive</span>
-            <div className="text-2xl font-bold mt-1 text-success">~10.5 USDC</div>
+          <Input
+            inputMode="decimal"
+            autoComplete="off"
+            placeholder="0.0"
+            value={sellRaw}
+            aria-invalid={amountInputInvalid}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSellRaw(e.target.value)}
+            className="text-lg font-medium"
+          />
+          <div className="min-h-[1.25rem] text-xs">
+            {parseResult.status === "precision_exceeded" && (
+              <span className="text-destructive">{parseResult.message}</span>
+            )}
+            {parseResult.status === "invalid" && (
+              <span className="text-destructive">{parseResult.message}</span>
+            )}
+            {parseResult.status === "ok" && (
+              <span className="text-muted-foreground">
+                Up to {sellMaxDecimals} decimals for this asset. Quotes update
+                after you stop typing.
+              </span>
+            )}
+            {parseResult.status === "empty" && sellRaw.trim() === "" && (
+              <span className="text-muted-foreground">
+                Paste amounts with US (1,234.56) or EU (1.234,56) grouping.
+                Scientific notation is not supported.
+              </span>
+            )}
           </div>
         </div>
 
-        <Button className="w-full text-lg h-12" onClick={handleSwapClick}>
+        <div className="space-y-4 bg-muted/20 p-4 rounded-lg border">
+          <div>
+            <span className="text-sm font-medium">Estimated receive</span>
+            <div className="text-2xl font-bold mt-1 text-success">
+              {quoteLoading && numericForQuote !== undefined ? (
+                <span className="flex items-center gap-2">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  ~ …
+                </span>
+              ) : (
+                <>
+                  {receivePreview}
+                  {selectedPair ? ` ${selectedPair.counter}` : ""}
+                </>
+              )}
+            </div>
+            {quoteError && numericForQuote !== undefined && (
+              <p className="text-xs text-destructive mt-1">
+                Quote failed: {quoteError.message}
+              </p>
+            )}
+          </div>
+          <div>
+            <span className="text-sm font-medium text-muted-foreground">
+              Reference price
+            </span>
+            <div className="text-sm mt-1">{quote?.price ?? "—"}</div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={refreshDisabled}
+              onClick={() => refresh()}
+              className="gap-2"
+            >
+              {quoteLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+              ) : (
+                <RefreshCw className="h-4 w-4" aria-hidden />
+              )}
+              Refresh quote
+            </Button>
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-input"
+                checked={autoRefreshEnabled}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAutoRefreshEnabled(e.target.checked)}
+              />
+              Auto-refresh (~{Math.round(QUOTE_AUTO_REFRESH_INTERVAL_MS / 1000)}s,
+              pauses when tab hidden)
+            </label>
+          </div>
+        </div>
+
+        <Button
+          className="w-full text-lg h-12"
+          onClick={handleSwapClick}
+          disabled={!selectedPair || parseResult.status !== "ok"}
+        >
           Review Swap
         </Button>
       </div>
 
       <TransactionConfirmationModal
         isOpen={isModalOpen}
-        onOpenChange={setIsModalOpen}
-        fromAsset="XLM"
-        fromAmount="100"
-        toAsset="USDC"
-        toAmount="10.5"
-        exchangeRate="0.105"
-        priceImpact="0.1%"
-        minReceived="10.45"
-        networkFee="0.00001"
-        routePath={mockRoute}
-        onConfirm={handleConfirm}
-        onCancel={handleCancel}
-        status={txStatus}
-        errorMessage={errorMessage}
-        txHash={txHash}
-        timelineEvents={timelineEvents}
-        timelineLocale={{
-          timelineLabel: "Transaction timeline",
-          timelineDescription:
-            "Status is correlated with wallet, API, and chain identifiers.",
+        onOpenChange={(open) => {
+          if (!open && txStatus !== "pending" && txStatus !== "submitted") {
+            setIsModalOpen(false);
+          }
         }}
+        fromAsset={selectedPair?.base ?? "XLM"}
+        fromAmount={parseResult.status === "ok" ? parseResult.normalized : ""}
+        toAsset={selectedPair?.counter ?? "USDC"}
+        toAmount={quote?.total ?? "—"}
+        exchangeRate={quote?.price ?? "—"}
+        priceImpact="0.1%"
+        networkFee="0.00001"
+        slippageTolerancePct={settings?.slippageTolerance}
+        routePath={quote?.path?.length ? quote.path : mockRoute}
+        status={txStatus}
+        txHash={txHash}
+        errorMessage={errorMessage}
+        onConfirm={handleConfirm}
+        onCancel={cancel}
+        onTryAgain={handleTryAgain}
+        onResubmit={handleResubmit}
+        onDismiss={handleDismiss}
+        onDone={handleDone}
       />
     </Card>
   );
