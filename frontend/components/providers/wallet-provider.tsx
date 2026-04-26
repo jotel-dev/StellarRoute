@@ -1,6 +1,25 @@
 import { createContext, useContext, ReactNode, useState } from 'react';
 
 interface WalletContextType {
+'use client';
+
+import * as React from 'react';
+import {
+  connectWallet,
+  disconnectWallet,
+  getAvailableWallets,
+  refreshWalletSession,
+} from '@/lib/wallet';
+import type {
+  AvailableWallet,
+  SupportedWallet,
+  WalletError,
+  WalletNetwork,
+  AccountSwitchState,
+} from '@/lib/wallet/types';
+
+interface WalletContextValue {
+  address: string | null;
   isConnected: boolean;
   network: WalletNetwork;
   walletNetwork: WalletNetwork | null;
@@ -15,8 +34,12 @@ interface WalletContextType {
   autoReconnectPreferred: boolean;
   setAutoReconnectPreferred: (enabled: boolean) => void;
   refreshWallets: () => Promise<void>;
+  refreshAccount: () => Promise<void>;
   networkMismatch: boolean;
   stubSpendableBalance: string | null;
+  accountSwitchState: AccountSwitchState;
+  isTransactionPending: boolean;
+  setTransactionPending: (pending: boolean) => void;
 }
 
 const WalletContext = createContext<WalletContextType | undefined>(undefined);
@@ -90,8 +113,20 @@ export function WalletProvider({
   }, [refreshWallets]);
 
   const connect = React.useCallback(async (selectedWalletId: SupportedWallet) => {
+    // Prevent account switching during transactions
+    if (isTransactionPending) {
+      setError({ message: 'Cannot switch accounts during a pending transaction' });
+      return;
+    }
+
     setIsLoading(true);
     setError(null);
+    setAccountSwitchState({
+      isDetecting: false,
+      hasChanged: false,
+      previousAddress: null,
+    });
+
     try {
       const session = await connectWallet(selectedWalletId);
       setAddress(session.address);
@@ -127,13 +162,65 @@ export function WalletProvider({
   }, [availableWallets, connect]);
 
   const disconnect = React.useCallback(() => {
+    // Prevent disconnection during transactions
+    if (isTransactionPending) {
+      setError({ message: 'Cannot disconnect during a pending transaction' });
+      return;
+    }
+
     const session = disconnectWallet();
     setAddress(session.address);
     setIsConnected(session.isConnected);
     setWalletNetwork(session.network ?? null);
     setWalletId(session.walletId);
     setError(null);
-  }, []);
+    setAccountSwitchState({
+      isDetecting: false,
+      hasChanged: false,
+      previousAddress: null,
+    });
+  }, [isTransactionPending]);
+
+  const refreshAccount = React.useCallback(async () => {
+    if (!walletId || !isConnected) return;
+
+    // Prevent account refresh during transactions
+    if (isTransactionPending) {
+      setError({ message: 'Cannot refresh account during a pending transaction' });
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const session = await refreshWalletSession(walletId);
+      const previousAddress = address;
+      
+      setAddress(session.address);
+      setIsConnected(session.isConnected);
+      setWalletNetwork(session.network ?? null);
+      setWalletId(session.walletId);
+
+      // Reset account switch state after successful refresh
+      setAccountSwitchState({
+        isDetecting: false,
+        hasChanged: false,
+        previousAddress: null,
+      });
+
+      // If address changed, this was an account switch
+      if (previousAddress && session.address !== previousAddress) {
+        // Trigger any necessary balance/quote refreshes here
+        console.log('Account switched from', previousAddress, 'to', session.address);
+      }
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error('Unknown error');
+      setError({ message: e.message });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [walletId, isConnected, address, isTransactionPending]);
 
   React.useEffect(() => {
     if (!didLoadReconnectPreference) {
@@ -194,8 +281,14 @@ export function WalletProvider({
     autoReconnectPreferred,
     setAutoReconnectPreferred,
     refreshWallets,
+    refreshAccount,
     networkMismatch,
     stubSpendableBalance,
+    accountSwitchState,
+    isTransactionPending,
+    setTransactionPending: React.useCallback((pending: boolean) => {
+      setIsTransactionPending(pending);
+    }, []),
   };
 
   return (
